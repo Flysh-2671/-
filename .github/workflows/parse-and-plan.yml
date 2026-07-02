@@ -8,7 +8,6 @@ on:
 
 jobs:
   parse-and-plan:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, 'chore: add parsed outputs')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
