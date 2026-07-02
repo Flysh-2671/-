@@ -35,6 +35,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
           git add -f outputs || true
           if ! git diff --cached --quiet; then
             git commit -m "chore: add parsed outputs and H2 planning results"
