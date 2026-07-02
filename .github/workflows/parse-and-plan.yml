@@ -31,15 +31,8 @@ jobs:
         run: |
           python scripts/parse_and_plan.py "已签预订单6.30.xlsx"
 
-      - name: Commit outputs if changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
-          git add -f outputs || true
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: add parsed outputs and H2 planning results"
-            git push origin HEAD
-          else
-            echo "No changes to commit"
-          fi
+      - name: Upload outputs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2-analysis
+          path: outputs/
