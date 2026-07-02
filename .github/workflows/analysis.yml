@@ -1,0 +1,42 @@
+name: analysis
+on:
+  schedule:
+    - cron: '0 1 * * *'  # every day at 01:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+    env:
+      TOTAL_TARGET: "4313"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run analysis script
+        run: |
+          mkdir -p reports
+          python scripts/calc_plan.py
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-reports
+          path: |
+            reports/report.txt
+            reports/plot.png
