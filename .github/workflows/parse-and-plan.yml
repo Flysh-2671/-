@@ -1,0 +1,45 @@
+name: Parse and Plan H2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/h2-planning
+
+jobs:
+  parse-and-plan:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, 'chore: add parsed outputs')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run parse_and_plan
+        env:
+          EXCEL_PASSWORD: ${{ secrets.EXCEL_PASSWORD }}
+        run: |
+          python scripts/parse_and_plan.py "已签预订单6.30.xlsx"
+
+      - name: Commit outputs if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f outputs || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: add parsed outputs and H2 planning results"
+            git push origin HEAD
+          else
+            echo "No changes to commit"
+          fi
