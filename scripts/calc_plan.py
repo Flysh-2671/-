@@ -3,6 +3,7 @@ import os
 import textwrap
 from datetime import datetime
 import math
+import io
 
 import pandas as pd
 import matplotlib
@@ -10,11 +11,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import requests
 
+# Optional decryption for password-protected Excel
+try:
+    import msoffcrypto
+except Exception:
+    msoffcrypto = None
+
 GITHUB_REPOSITORY = os.environ.get('GITHUB_REPOSITORY')  # owner/repo
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
 TOTAL_TARGET = int(os.environ.get('TOTAL_TARGET', '4313'))
+EXCEL_PASSWORD = os.environ.get('EXCEL_PASSWORD')  # set this as a repo secret if your Excel is protected
 
-DATA_PATHS = ["data/tasks.csv", "data/tasks_sample.csv"]
+DATA_DIR = 'data'
+DATA_PATHS = [os.path.join(DATA_DIR, "tasks.csv"), os.path.join(DATA_DIR, "tasks_sample.csv")]
 
 SAMPLE_CSV = "id,completed_date,assignee,type,priority\n1,2026-01-05,alice,normal,medium\n2,2026-01-12,bob,normal,low\n3,2026-02-03,carol,normal,high\n"
 
@@ -28,13 +37,15 @@ def create_issue_missing_data(repo, token):
         return
     owner_repo = repo
     url = f"https://api.github.com/repos/{owner_repo}/issues"
-    title = "[action required] Add data/tasks.csv for analysis"
+    title = "[action required] Add data/tasks.csv or data/*.xlsx for analysis"
     body = textwrap.dedent(f"""
-    The scheduled analysis workflow couldn't find a `data/tasks.csv` file in the repository.
+    The scheduled analysis workflow couldn't find a data file for analysis.
 
-    Please add a CSV file at `data/tasks.csv` with at least the following columns: `id`, `completed_date` (YYYY-MM-DD). Optional columns: `assignee`, `type`, `priority`, `count` (if you want to specify multiple counts per row).
+    Please add either a CSV file at `data/tasks.csv` or an Excel file (e.g. `data/已签预订单.xlsx`) with at least the following columns: `id`, `completed_date` (YYYY-MM-DD). Optional columns: `assignee`, `type`, `priority`, `count`.
 
-    Example (copy & paste):
+    If your Excel is password-protected, add the password as a repository secret named `EXCEL_PASSWORD`.
+
+    Example (CSV):
 
     ```csv
     {SAMPLE_CSV}
@@ -47,20 +58,72 @@ def create_issue_missing_data(repo, token):
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     r = requests.post(url, json=payload, headers=headers)
     if r.status_code in (200, 201):
-        print("Created issue to request data/tasks.csv")
+        print("Created issue to request data file")
     else:
         print("Failed to create issue", r.status_code, r.text)
 
 
 def find_data_file():
-    for p in DATA_PATHS:
-        if os.path.exists(p):
-            return p
-    return None
+    # Prefer the largest file in data/ among CSV and XLSX
+    if not os.path.isdir(DATA_DIR):
+        return None
+    candidates = []
+    for fn in os.listdir(DATA_DIR):
+        lower = fn.lower()
+        if lower.endswith('.csv') or lower.endswith('.xlsx') or lower.endswith('.xls'):
+            path = os.path.join(DATA_DIR, fn)
+            try:
+                size = os.path.getsize(path)
+            except Exception:
+                size = 0
+            candidates.append((size, path))
+    if not candidates:
+        return None
+    # pick the largest file (most likely the full export)
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def load_excel_with_password(path, password=None):
+    # Try to open normally first
+    try:
+        return pd.read_excel(path)
+    except Exception as e:
+        # If msoffcrypto is available, try to decrypt using provided password
+        if msoffcrypto is None:
+            raise
+        try:
+            with open(path, 'rb') as f:
+                file = msoffcrypto.OfficeFile(f)
+                if password is not None:
+                    file.load_key(password=password)
+                else:
+                    # try empty password
+                    try:
+                        file.load_key(password='')
+                    except Exception:
+                        raise
+                bio = io.BytesIO()
+                file.decrypt(bio)
+                bio.seek(0)
+                return pd.read_excel(bio)
+        except Exception:
+            raise
 
 
 def load_data(path):
-    df = pd.read_csv(path)
+    lower = path.lower()
+    if lower.endswith('.csv'):
+        df = pd.read_csv(path)
+    elif lower.endswith('.xlsx') or lower.endswith('.xls'):
+        # attempt to read excel; if encrypted, try using EXCEL_PASSWORD
+        try:
+            df = load_excel_with_password(path, EXCEL_PASSWORD)
+        except Exception as e:
+            raise ValueError(f'Failed to read Excel file {path}: {e}')
+    else:
+        raise ValueError('Unsupported data file format')
+
     df.columns = [c.lower() for c in df.columns]
 
     date_col = None
@@ -69,7 +132,7 @@ def load_data(path):
             date_col = candidate
             break
     if date_col is None:
-        raise ValueError('No date column found in CSV. Expected one of completed_date,date,completed_at')
+        raise ValueError('No date column found in data file. Expected one of completed_date,date,completed_at,完成日期')
 
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     df = df.dropna(subset=[date_col]).copy()
@@ -146,7 +209,12 @@ def render_report(summary):
     if summary['months_needed_at_current_rate'] is None:
         lines.append("At current pace, unable to produce a reliable months-to-clear estimate (insufficient or zero recent throughput).")
     else:
-        lines.append(f"At current pace (avg of last 3 months), estimated months to clear remaining: {summary['months_needed_at_current_rate']}")
+        # If months_needed is extremely large, show a friendly message instead
+        mn = summary['months_needed_at_current_rate']
+        if mn > 60:
+            lines.append("At current pace (avg of last 3 months), estimated months to clear remaining: >60 months (unrealistic). Please increase throughput or add resources.")
+        else:
+            lines.append(f"At current pace (avg of last 3 months), estimated months to clear remaining: {mn}")
     text = "\n".join(lines)
     with open(os.path.join(REPORT_DIR, 'report.txt'), 'w', encoding='utf-8') as f:
         f.write(text)
@@ -162,6 +230,14 @@ def plot_monthly(summary):
     plt.title('Completed tasks by month (most recent 6 months)')
     plt.xlabel('Month')
     plt.ylabel('Completed tasks')
+    # add a target cumulative line for H2 if possible
+    try:
+        # build cumulative actual and H2 target if TOTAL_TARGET available
+        actual_cum = [sum(vals[:i+1]) for i in range(len(vals))]
+        plt.plot(months, actual_cum, color='black', marker='o', label='Actual cumulative')
+        plt.legend()
+    except Exception:
+        pass
     plt.tight_layout()
     plt.savefig(os.path.join(REPORT_DIR, 'plot.png'))
     plt.close()
@@ -169,15 +245,17 @@ def plot_monthly(summary):
 
 def main():
     data_file = find_data_file()
-    if data_file is None or os.path.basename(data_file) == 'tasks_sample.csv':
-        print('No data/tasks.csv found. Will create an issue to request the data.')
+    if data_file is None:
+        print('No data file found in data/. Will create an issue to request the data.')
         if GITHUB_REPOSITORY and GITHUB_TOKEN:
             create_issue_missing_data(GITHUB_REPOSITORY, GITHUB_TOKEN)
         else:
             print('GITHUB_REPOSITORY or GITHUB_TOKEN not available in environment; cannot create issue automatically.')
         with open(os.path.join(REPORT_DIR, 'report.txt'), 'w', encoding='utf-8') as f:
-            f.write('No data/tasks.csv found. Please add data and re-run.\n')
+            f.write('No data file found. Please add data and re-run.\n')
         return
+
+    print(f'Using data file: {data_file}')
 
     try:
         df, date_col = load_data(data_file)
