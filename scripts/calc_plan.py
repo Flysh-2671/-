@@ -2,6 +2,7 @@
 import os
 import textwrap
 from datetime import datetime
+import math
 
 import pandas as pd
 import matplotlib
@@ -86,12 +87,15 @@ def summarize(df, date_col):
 
     monthly = df.groupby('year_month').size().sort_index()
     now = pd.Timestamp.now()
-    months = pd.period_range(end=now.to_period('M'), periods=6)
+    # Use the last 6 complete months ending with the previous month to avoid partial current month bias
+    end_period = (now - pd.offsets.MonthBegin(1)).to_period('M')
+    months = pd.period_range(end=end_period, periods=6)
     months_str = [m.strftime('%Y-%m') for m in months]
     monthly_recent = monthly.reindex(months_str, fill_value=0)
 
-    avg_month_3 = int(monthly_recent[-3:].mean()) if len(monthly_recent) >= 3 else int(monthly_recent.mean())
-    avg_month_6 = int(monthly_recent.mean())
+    # keep averages as floats for more accurate estimation
+    avg_month_3 = monthly_recent[-3:].mean() if len(monthly_recent) >= 3 else monthly_recent.mean()
+    avg_month_6 = monthly_recent.mean()
 
     remaining = max(0, TOTAL_TARGET - total_completed)
 
@@ -99,14 +103,18 @@ def summarize(df, date_col):
     per_week = (remaining + 26 - 1) // 26
     per_workday = (remaining + 126 - 1) // 126
 
-    current_rate = avg_month_3 if avg_month_3 > 0 else max(1, avg_month_6)
-    months_needed = (remaining + current_rate - 1) // current_rate
+    # more robust current rate handling
+    current_rate = avg_month_3 if avg_month_3 > 0 else avg_month_6
+    if current_rate is None or current_rate <= 0:
+        months_needed = None
+    else:
+        months_needed = math.ceil(remaining / current_rate)
 
     summary = {
         'total_completed': total_completed,
         'monthly_recent': monthly_recent.to_dict(),
-        'avg_month_3': avg_month_3,
-        'avg_month_6': avg_month_6,
+        'avg_month_3': float(avg_month_3) if avg_month_3 is not None else 0.0,
+        'avg_month_6': float(avg_month_6) if avg_month_6 is not None else 0.0,
         'remaining': remaining,
         'per_month': per_month,
         'per_week': per_week,
@@ -127,15 +135,18 @@ def render_report(summary):
     for m, v in summary['monthly_recent'].items():
         lines.append(f"  {m}: {v}")
     lines.append("")
-    lines.append(f"Average per month (last 3 months): {summary['avg_month_3']}")
-    lines.append(f"Average per month (last 6 months): {summary['avg_month_6']}")
+    lines.append(f"Average per month (last 3 months): {round(summary['avg_month_3'], 2)}")
+    lines.append(f"Average per month (last 6 months): {round(summary['avg_month_6'], 2)}")
     lines.append("")
     lines.append("Suggested cadence to clear remaining (evenly over 6 months):")
     lines.append(f"  Per month: {summary['per_month']}")
     lines.append(f"  Per week: {summary['per_week']}")
     lines.append(f"  Per workday: {summary['per_workday']}")
     lines.append("")
-    lines.append(f"At current pace (avg of last 3 months), estimated months to clear remaining: {summary['months_needed_at_current_rate']}")
+    if summary['months_needed_at_current_rate'] is None:
+        lines.append("At current pace, unable to produce a reliable months-to-clear estimate (insufficient or zero recent throughput).")
+    else:
+        lines.append(f"At current pace (avg of last 3 months), estimated months to clear remaining: {summary['months_needed_at_current_rate']}")
     text = "\n".join(lines)
     with open(os.path.join(REPORT_DIR, 'report.txt'), 'w', encoding='utf-8') as f:
         f.write(text)
