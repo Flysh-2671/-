@@ -1,0 +1,8 @@
+id,completed_date,assignee,type,priority
+1,2026-01-05,alice,normal,medium
+2,2026-01-12,bob,normal,low
+3,2026-02-03,carol,normal,high
+4,2026-03-15,alice,normal,medium
+5,2026-04-20,bob,normal,low
+6,2026-05-10,carol,normal,medium
+7,2026-06-18,alice,normal,high
