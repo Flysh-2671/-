@@ -30,6 +30,8 @@ SAMPLE_CSV = "id,completed_date,assignee,type,priority\n1,2026-01-05,alice,norma
 REPORT_DIR = "reports"
 os.makedirs(REPORT_DIR, exist_ok=True)
 
+DATE_CANDIDATES = ['completed_date', 'date', '完成日期', 'completed_at', '签约日期', '签约时间', '下单日期', '成交日期']
+
 
 def create_issue_missing_data(repo, token):
     if not repo or not token:
@@ -87,8 +89,8 @@ def find_data_file():
 def load_excel_with_password(path, password=None):
     # Try to open normally first
     try:
-        return pd.read_excel(path)
-    except Exception as e:
+        return pd.read_excel(path, sheet_name=None)
+    except Exception:
         # If msoffcrypto is available, try to decrypt using provided password
         if msoffcrypto is None:
             raise
@@ -98,7 +100,6 @@ def load_excel_with_password(path, password=None):
                 if password is not None:
                     file.load_key(password=password)
                 else:
-                    # try empty password
                     try:
                         file.load_key(password='')
                     except Exception:
@@ -106,7 +107,7 @@ def load_excel_with_password(path, password=None):
                 bio = io.BytesIO()
                 file.decrypt(bio)
                 bio.seek(0)
-                return pd.read_excel(bio)
+                return pd.read_excel(bio, sheet_name=None)
         except Exception:
             raise
 
@@ -115,32 +116,101 @@ def load_data(path):
     lower = path.lower()
     if lower.endswith('.csv'):
         df = pd.read_csv(path)
+        df.columns = [c.lower() for c in df.columns]
+        date_col = None
+        for candidate in DATE_CANDIDATES:
+            if candidate in df.columns:
+                date_col = candidate
+                break
+        if date_col is None:
+            # try to find the column that parses best as dates
+            best_col = None
+            best_count = 0
+            for col in df.columns:
+                parsed = pd.to_datetime(df[col], errors='coerce')
+                c = parsed.notna().sum()
+                if c > best_count:
+                    best_count = c
+                    best_col = col
+            if best_count >= max(1, int(0.05 * len(df))):
+                date_col = best_col
+        if date_col is None:
+            raise ValueError('No date column found in CSV. Expected one of: ' + ','.join(DATE_CANDIDATES))
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        df = df.dropna(subset=[date_col]).copy()
+        df['year_month'] = df[date_col].dt.to_period('M').astype(str)
+        data_source = os.path.basename(path)
+        return df, date_col, data_source
+
     elif lower.endswith('.xlsx') or lower.endswith('.xls'):
-        # attempt to read excel; if encrypted, try using EXCEL_PASSWORD
+        # read all sheets and pick the most promising one
         try:
-            df = load_excel_with_password(path, EXCEL_PASSWORD)
+            sheets = load_excel_with_password(path, EXCEL_PASSWORD)
         except Exception as e:
             raise ValueError(f'Failed to read Excel file {path}: {e}')
+
+        best_sheet = None
+        best_df = None
+        best_rows = 0
+        best_date_col = None
+
+        for sheet_name, sheet_df in sheets.items():
+            if sheet_df is None or sheet_df.empty:
+                continue
+            df_sheet = sheet_df.copy()
+            # normalize column names
+            df_sheet.columns = [str(c).lower().strip() for c in df_sheet.columns]
+            # try to find a date column by name first
+            date_col = None
+            for candidate in DATE_CANDIDATES:
+                if candidate in df_sheet.columns:
+                    date_col = candidate
+                    break
+            # if not found, try to auto-detect by parseable date counts
+            if date_col is None:
+                best_col = None
+                best_count = 0
+                for col in df_sheet.columns:
+                    try:
+                        parsed = pd.to_datetime(df_sheet[col], errors='coerce')
+                        c = int(parsed.notna().sum())
+                    except Exception:
+                        c = 0
+                    if c > best_count:
+                        best_count = c
+                        best_col = col
+                # choose if there are at least a few parseable dates or >=5% of rows
+                if best_count >= max(5, int(0.05 * len(df_sheet))):
+                    date_col = best_col
+
+            if date_col is not None:
+                # compute number of valid date rows
+                parsed = pd.to_datetime(df_sheet[date_col], errors='coerce')
+                valid = int(parsed.notna().sum())
+                rows = len(df_sheet)
+                # prefer sheet with more valid rows
+                if valid > best_rows:
+                    best_rows = valid
+                    best_sheet = sheet_name
+                    best_df = df_sheet
+                    best_date_col = date_col
+
+        if best_sheet is None:
+            raise ValueError('No suitable sheet with parseable date column found in Excel file')
+
+        # finalize
+        df_final = best_df.copy()
+        df_final[best_date_col] = pd.to_datetime(df_final[best_date_col], errors='coerce')
+        df_final = df_final.dropna(subset=[best_date_col]).copy()
+        df_final['year_month'] = df_final[best_date_col].dt.to_period('M').astype(str)
+        data_source = os.path.basename(path) + '::' + str(best_sheet)
+        return df_final, best_date_col, data_source
+
     else:
         raise ValueError('Unsupported data file format')
 
-    df.columns = [c.lower() for c in df.columns]
 
-    date_col = None
-    for candidate in ['completed_date', 'date', '完成日期', 'completed_at']:
-        if candidate in df.columns:
-            date_col = candidate
-            break
-    if date_col is None:
-        raise ValueError('No date column found in data file. Expected one of completed_date,date,completed_at,完成日期')
-
-    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-    df = df.dropna(subset=[date_col]).copy()
-    df['year_month'] = df[date_col].dt.to_period('M').astype(str)
-    return df, date_col
-
-
-def summarize(df, date_col):
+def summarize(df, date_col, data_source=None):
     total_completed = int(df.shape[0])
     if 'count' in df.columns:
         try:
@@ -174,6 +244,7 @@ def summarize(df, date_col):
         months_needed = math.ceil(remaining / current_rate)
 
     summary = {
+        'data_source': data_source,
         'total_completed': total_completed,
         'monthly_recent': monthly_recent.to_dict(),
         'avg_month_3': float(avg_month_3) if avg_month_3 is not None else 0.0,
@@ -191,6 +262,8 @@ def render_report(summary):
     lines = []
     lines.append(f"Analysis run: {datetime.utcnow().isoformat()}Z")
     lines.append(f"TOTAL_TARGET = {TOTAL_TARGET}")
+    if summary.get('data_source'):
+        lines.append(f"Data source: {summary['data_source']}")
     lines.append(f"Total completed (from data): {summary['total_completed']}")
     lines.append(f"Remaining to reach target: {summary['remaining']}")
     lines.append("")
@@ -209,12 +282,49 @@ def render_report(summary):
     if summary['months_needed_at_current_rate'] is None:
         lines.append("At current pace, unable to produce a reliable months-to-clear estimate (insufficient or zero recent throughput).")
     else:
-        # If months_needed is extremely large, show a friendly message instead
         mn = summary['months_needed_at_current_rate']
         if mn > 60:
             lines.append("At current pace (avg of last 3 months), estimated months to clear remaining: >60 months (unrealistic). Please increase throughput or add resources.")
         else:
             lines.append(f"At current pace (avg of last 3 months), estimated months to clear remaining: {mn}")
+
+    # add H2 monthly breakdown (even split)
+    h2_total = TOTAL_TARGET
+    baseline_h2 = None
+    shortfall = None
+    # if analysis_config.yaml exists, try to read values
+    try:
+        import yaml
+        cfg_path = 'analysis_config.yaml'
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as cf:
+                cfg = yaml.safe_load(cf)
+            baseline_h2 = cfg.get('baseline_h2')
+            shortfall = cfg.get('shortfall')
+            h2_total = cfg.get('total_target', TOTAL_TARGET)
+    except Exception:
+        pass
+
+    lines.append("")
+    lines.append("H2 planning (7-12 month) — even distribution")
+    lines.append(f"  H2 total target: {h2_total}")
+    if baseline_h2 is not None:
+        lines.append(f"  Baseline H2: {baseline_h2}")
+    if shortfall is not None:
+        lines.append(f"  Shortfall to cover: {shortfall}")
+    # distribute remaining across 6 months
+    remaining = summary['remaining']
+    per_month = summary['per_month']
+    months = ['2026-07','2026-08','2026-09','2026-10','2026-11','2026-12']
+    # allocate evenly and adjust last month
+    alloc = [per_month] * 6
+    total_alloc = sum(alloc)
+    diff = remaining - total_alloc
+    alloc[-1] += diff
+    lines.append("  Monthly breakdown:")
+    for m, a in zip(months, alloc):
+        lines.append(f"    {m}: {a}")
+
     text = "\n".join(lines)
     with open(os.path.join(REPORT_DIR, 'report.txt'), 'w', encoding='utf-8') as f:
         f.write(text)
@@ -225,14 +335,13 @@ def plot_monthly(summary):
     monthly = summary['monthly_recent']
     months = list(monthly.keys())
     vals = list(monthly.values())
-    plt.figure(figsize=(8, 4))
+    plt.figure(figsize=(10, 4))
     plt.bar(months, vals, color='#2b81e6')
     plt.title('Completed tasks by month (most recent 6 months)')
     plt.xlabel('Month')
     plt.ylabel('Completed tasks')
-    # add a target cumulative line for H2 if possible
+    # add a cumulative actual line
     try:
-        # build cumulative actual and H2 target if TOTAL_TARGET available
         actual_cum = [sum(vals[:i+1]) for i in range(len(vals))]
         plt.plot(months, actual_cum, color='black', marker='o', label='Actual cumulative')
         plt.legend()
@@ -258,14 +367,14 @@ def main():
     print(f'Using data file: {data_file}')
 
     try:
-        df, date_col = load_data(data_file)
+        df, date_col, data_source = load_data(data_file)
     except Exception as e:
         print('Failed to load data:', e)
         with open(os.path.join(REPORT_DIR, 'report.txt'), 'w', encoding='utf-8') as f:
             f.write('Failed to load data: ' + str(e) + '\n')
         return
 
-    summary = summarize(df, date_col)
+    summary = summarize(df, date_col, data_source=data_source)
     render_report(summary)
     plot_monthly(summary)
 
