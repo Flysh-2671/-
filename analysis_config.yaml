@@ -1,0 +1,30 @@
+# analysis_config.yaml — 下半年任务规划配置
+# total_target: 最终在 H2 期望完成的总量（可以等于 baseline_h2 + shortfall）
+total_target: 4313
+
+# baseline_h2: 原本下半年要完成的常规目标（仅用于报告可读性）
+baseline_h2: 3714
+
+# shortfall: 需从上半年补上的缺口（会被包含在 total_target 中）
+shortfall: 599
+
+# planning_period: 支持 "H2" 或自定义 YYYY-MM to YYYY-MM 区间 (例如 "2026-07:2026-12")
+planning_period: "H2"
+
+# months_window: 用于计算历史吞吐率的最近月份数量（用于 weighted 分配等）
+months_window: 6
+
+# exclude_current_month: 是否在计算历史平均时排除当前未完成的月份（推荐 true）
+exclude_current_month: true
+
+# distribution: "evenly" 或 "weighted_by_history"
+#   evenyly: 在剩余的 months 中均分
+#   weighted_by_history: 按历史每月或每人完成占比分配（需要 assignee 数据）
+distribution: "evenly"
+
+# weighted_by_history 额外参数：若选择按历史分配，最少需要多少月的数据才认为可靠
+weighted_min_months_required: 3
+
+# 工作日和周的近似数（用于把月目标拆到周/工作日）
+weeks_in_period: 26   # H2 近似周数
+workdays_in_period: 126  # H2 近似工作日数
